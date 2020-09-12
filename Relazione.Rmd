@@ -1,0 +1,342 @@
+---
+title: "Relazione"
+author: "Emanuele Artioli"
+date: "May 15, 2020"
+output:
+  pdf_document: default
+  html_document: default
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+set.seed(1234)
+```
+
+# ANALISI GIOCO DI CARTE COLLEZIONABILI: MAGIC THE GATHERING
+
+## ABSTRACT
+
+Questo progetto analizza componenti estetiche e funzionali del database di carte collezionabili Magic the Gathering dal 1993, anno della sua presentazione.
+
+## GIOCO
+
+In breve, MtG rappresenta un duello tra maghi, che a turni lanciano magie rappresentate dalle proprie carte. Queste magie richiedono mana, energia elementale di 5 colori attinta da altrettanti tipi di carte terra: Pianura per il bianco, Isola per il blu, Palude per il nero, Montagna per il rosso, e Foresta per il verde. Tra i tipi di magie troviamo creature, incantesimi, stregonerie, artefatti, e non solo. Ogni tipo di magia ha caratteristiche peculiari.
+
+## DATI
+
+Il dataset è stato scaricato da https://mtgjson.com/ e importato in forma di database SQLite tramite libreria RSQLite. Per la presente analisi, ci concentriamo sulle tabelle:
+
+1. cards, contenente 70 variabili per più di 50000 carte.
+
+2. prices, una lista dei prezzi aggiornata quotidianamente
+
+3. legalities, la lista dei tornei nei quali ogni carta può essere giocata.
+
+4. sets, la lista delle edizioni delle carte.
+
+```{r import, include=FALSE}
+if(!require(tidyverse)) install.packages("tidyverse",repos = "http://cran.us.r-project.org")
+if(!require(DBI)) install.packages("DBI",repos = "http://cran.us.r-project.org")
+if(!require(corrplot)) install.packages("corrplot",repos = "http://cran.us.r-project.org")
+if(!require(grid)) install.packages("grid",repos = "http://cran.us.r-project.org")
+if(!require(gridExtra)) install.packages("gridExtra",repos = "http://cran.us.r-project.org")
+if(!require(RSQLite)) install.packages("RSQLite",repos = "http://cran.us.r-project.org")
+
+library(tidyverse)
+library(RSQLite)
+library(corrplot)
+library(DBI)
+library(grid)
+library(gridExtra)
+
+con <- dbConnect(RSQLite::SQLite(), dbname="AllPrintings.sqlite")
+```
+
+```{r reformat, include=FALSE}
+cards <- data.frame(dbReadTable(con, "cards"))
+prices <- data.frame(dbReadTable(con, "prices"))
+legalities <- data.frame(dbReadTable(con, "legalities"))
+sets <- data.frame(dbReadTable(con, "sets"))
+
+prices <- prices[grep("paper", prices$type), c("uuid", "price")] %>% #only paper prices
+  group_by(uuid) %>% # most cards were printed multiple times
+  summarize(price = mean(price)) # their average price will be included
+
+legalities <- legalities[grep("vintage", legalities$format), "uuid"] # only tourneament legal cards
+
+sets <- sets %>% filter(type %in% c("core", "expansion", "masters", "commander", "duel_deck", "from_the_vault"))
+sets <- sets[c("name", "keyruneCode", "releaseDate", "totalSetSize", "block")]# remove judge prizes cards and the likes
+
+cards <- cards[cards$isPaper == 1, ]         # only paper,
+cards <- cards[cards$isOversized == 0, ]     # usual dimension,
+cards <- cards[cards$layout == "normal", ]   # normal layout,
+cards <- cards[cards$borderColor == "black", ] # black bordered,
+cards <- cards[cards$uuid %in% legalities, ]     # legacy legal cards
+
+# binarizing colors:
+cards$white <- 0
+cards$white[grep("W", cards$colorIdentity)] <- 1
+cards$blue <- 0
+cards$blue[grep("U", cards$colorIdentity)] <- 1
+cards$black <- 0
+cards$black[grep("B", cards$colorIdentity)] <- 1
+cards$red <- 0
+cards$red[grep("R", cards$colorIdentity)] <- 1
+cards$green <- 0
+cards$green[grep("G", cards$colorIdentity)] <- 1
+colnames(cards)[colnames(cards) == "colorIdentity"] <- "colorless" #colorIdentity becomes the colorless column
+cards$colorless[!is.na(cards$colorless)] <- 0 #the rows where colorIdentity had value get colorless = 0
+cards$colorless[is.na(cards$colorless)] <- 1 #the remaining (where colorIdentity was NA) get 1
+
+# unique.colors <- strsplit(cards$colorIdentity, ",") %>% unlist() %>% unique() # get the possible values of color
+# for(color in unique.colors) {
+#   cards$color <- 0 #all values become 0
+#   if(is.na(color)) {
+#     cards$color[grep("NA", cards$colorIdentity)] <- 1 # fill with 1 the rows where the color checks out
+#     names(cards)[names(cards) == "color"] <- "colorless" # the NA column gets renamed
+#   }
+#   else {
+#     cards$color[grep(color, cards$colorIdentity)] <- 1
+#     names(cards)[names(cards) == "color"] <- color # the other columns get their actual names
+#   }
+# }
+
+unique.supertypes <- strsplit(cards$supertypes, ",") %>% unlist() %>% unique() # get the possible values of supertype
+for(supertype in unique.supertypes) {
+  cards$supertype <- 0 #all values become 0
+  cards$supertype[grep(supertype, cards$supertypes)] <- 1 # fill with 1 the rows where the supertype checks out
+  if(is.na(supertype)) {
+    names(cards)[names(cards) == "supertype"] <- "No supertype" # the NA column gets renamed
+  }
+  else {
+    names(cards)[names(cards) == "supertype"] <- supertype # the other columns get their actual names
+  }
+}
+
+unique.types <- strsplit(cards$types, ",") %>% unlist() %>% unique() # get the possible values of type
+for(type in unique.types) {
+  cards$type <- 0 #all values become 0
+  cards$type[grep(type, cards$types)] <- 1 # fill with 1 the rows where the type checks out
+  if(is.na(type)) {
+    names(cards)[names(cards) == "type"] <- "No type" # the NA column gets renamed
+  }
+  else {
+    names(cards)[names(cards) == "type"] <- type # the other columns get their actual names
+  }
+}
+
+unique.subtypes <- strsplit(cards$subtypes, ",") %>% unlist() %>% unique()
+for(subtype in unique.subtypes) {
+  cards$subtype <- 0 #all values become 0
+  cards$subtype[grep(subtype, cards$subtypes)] <- 1 # fill with 1 the rows where the subtype checks out
+  if(is.na(subtype)) {
+    names(cards)[names(cards) == "subtype"] <- "No subtype" # the NA column gets renamed
+  }
+  else {
+    names(cards)[names(cards) == "subtype"] <- subtype # the other columns get their actual names
+  }
+}
+
+#setting the data types correctly:
+suppressWarnings(cards$loyalty <- cards$loyalty %>% as.numeric())
+suppressWarnings(cards$power <- cards$power %>% as.numeric())
+suppressWarnings(cards$toughness <- cards$toughness %>% as.numeric())
+suppressWarnings(cards$colorless <- cards$colorless %>% as.numeric())
+
+# joining the tables in a single dataframe
+df <- merge(cards, prices, by="uuid")
+
+# dropping cards columns:
+drops <- c("id", "artist", "borderColor", "colorIdentity", "colorIndicator", "colors", "duelDeck", "edhrecRank", "faceConvertedManaCost", "flavorText", "frameEffect", "frameEffects", "frameVersion", "hand", "hasFoil", "hasNoDeckLimit", "hasNonFoil", "isAlternative", "isArena", "isBuyABox", "isDateStamped", "isFullArt", "isMtgo", "isOnlineOnly", "isOversized", "isPaper", "isPromo", "isReprint", "isReserved", "isStarter", "isStorySpotlight", "isTextless", "isTimeshifted", "layout", "leadershipSkills", "life", "manaCost", "mcmId", "mcmMetaId", "mtgArenaId", "mtgoFoilId", "mtgoId", "multiverseId", "names", "number", "originalText", "originalType", "otherFaceIds", "printings", "purchaseUrls", "scryfallId", "scryfallIllustrationId", "scryfallOracleId", "side", "tcgplayerProductId", "text", "type", "uuid", "variations", "watermark")
+df <- df[, !(names(df) %in% drops)]
+
+
+df <- df[, c("name", "convertedManaCost", "white", "blue", "black", "red", "green", "colorless", "supertypes", "types", "subtypes", "rarity", "setCode", "loyalty", "power", "toughness", "price")]
+df$rarity = factor(df$rarity, levels=c("common", "uncommon", "rare", "mythic"), ordered=TRUE) #factorizing it before didn't work out, ideally this would be done on cards
+df$types = factor(df$types, ordered=FALSE) #factorizing it before didn't work out, ideally this would be done on cards
+
+creatures <- df[df$types == "Creature", ]
+creatures$loyalty <- NULL
+creatures$types <- NULL
+
+planeswalkers <- df[df$types == "Planeswalker", ]
+planeswalkers$power <- NULL
+planeswalkers$toughness <- NULL
+planeswalkers$types <- NULL
+
+df <- df[, !(names(df) %in% c("power", "toughness", "loyalty"))]
+df.numeric <- df[, c("convertedManaCost", "white", "blue", "black", "red", "green", "colorless", "price")]
+```
+
+Il dataset iniziale conteneva più di 200000 righe, ma queste comprendevano ogni ristampa, nonchè carte ironiche mai pensate per essere giocate e dunque non conformi alle regole del gioco, e altre tipologie di carte utilizzabili solo in contesti speciali. Vi era poi, come è facile prevedere, un gran numero di ridondanze, errori o ambiguità nel dataset. Inoltre, MtG ha negli anni introdotto molte regole aggiuntive che hanno modificato o sostituito quelle precedenti, rendendo obsolete alcune carte che sono pertanto una complicazione, peraltro difficile da individuare, non secondaria. Per tutti questi motivi, il dataset è stato decisamente rimaneggiato, mantenendo però assolutamente intatta l'informazione. Dopo le modifiche preliminari, le variabili di interesse sono le seguenti:
+
+#### DF (unione di cards, prices e legalities, meno gli attributi relativi solo a particolari tipi di carta)
+
+1. name (character)
+
+2. convertedManaCost (numeric)
+
+3. white (numeric)
+
+4. blue (numeric)
+
+5. black (numeric)
+
+6. red (numeric)
+
+7. green (numeric)
+
+8. colorless (numeric)
+
+9. types (character)
+
+10. rarity (factor)
+
+11. setCode (character)
+
+12. price (numeric)
+
+## PANORAMICA
+
+Iniziamo la nostra analisi con una concisa rappresentazione delle principali caratteristiche comuni ad ogni carta, per avere una visione ad alto livello del dataset.
+
+```{r echo=FALSE}
+corrplot(cor(df.numeric, use="complete.obs"))
+```
+
+Da una preliminare analisi di correlazione si vede come gli attributi numerici non diano molte informazioni, tranne quella data dalla leggera correlazione negativa tra i colori, che ci indica una tendenza delle carte ad avere pochi colori. L'analisi si dovrà allora concentrare sugli attributi non numerici, che analizzeremo uno per volta. Dati così poco correlati potrebbero scoraggiare dall'indagare ulteriormente il dataset, poniamo però l'attenzione su un limite della correlazione tramite un esempio lampante: se consideriamo la correlazione, come detto leggermente negativa, tra gli attributi white e colorless, potremmo essere portati a pensare che questi possano coesistere relativamente spesso, e invece è ovvio che essi siano mutuamente esclusivi. La negatività della correlazione viene attenuata soltanto dall'ingente numero di casi in cui entrambi gli attributi sono assenti (ovvero la carta ha colore, ma non bianco).
+
+```{r echo=FALSE}
+ggplot(df, aes(convertedManaCost)) + geom_bar(aes(fill=rarity)) +
+  xlab("converted mana cost") +
+  theme_bw()
+```
+
+E' subito evidente come la distribuzione del costo di mana sia positivamente asimmetrica, per quanto media e mediana siano quasi coincidenti (mediana = 3, media = 3.047). La variabilità è contenuta, con scarto quadratico medio di 1.95 e coefficiente di variazione 0.64.
+
+Un'altra osservazione degna di nota è relativa alla distribuzione delle rarità: tralasciando le carte mitiche, che sono state introdotte dopo molti anni dalla nascita di MtG, vediamo come il numero di carte sia pressapoco lo stesso per ogni rarità, semplicemente distribuito in maniera differente: al crescere del costo di mana, cresce la rarità media. In ogni busta però si trovano più di 10 carte comuni, 3 non-comuni e 1 sola rara. Se uniamo questo alla grande varietà di carte rare, ricaviamo che trovare una particolare carta rara è particolarmente difficile, e questo senza dubbio contribuirà ad alzare il prezzo di alcune di queste, le più ricercate.
+
+## Obiettivo dell'analisi: Prezzo
+
+Il punto di partenza per un'analisi più approfondita sarà il prezzo delle carte. Infatti, l'analisi è inquadrata nella ricerca di caratteristiche comuni alle carte che possano rispondere alla seguente domanda: è possibile prevedere il prezzo di una carta dalle sue caratteristiche?
+Abbiamo già visto come il prezzo non sia correlato al costo di mana nè al colore, ma ciò non toglie che possano sussistere legami che sfuggono a questa prima analisi. Un'altra possibilità è che il legame sia da ricercare negli attributi non numerici.
+
+```{r, echo=FALSE}
+ggplot(df, aes(factor(convertedManaCost), price)) + 
+  geom_boxplot(fill="lightgrey") +
+  xlab("converted mana cost") +
+  scale_y_log10(breaks=c(0.01, 0.1, 1, 10, 100, 1000), labels=c("0.01", "0.1", "1", "10", "100", "1000")) +
+  theme_bw() 
+```
+
+Il grafico mostra una dispersione di prezzo elevata, con molte carte di nessun valore e picchi che invece superano le migliaia di euro per singolo pezzo. Questa dispersione è però fortemente influenzata da questi ultimi, che possiamo considerare outlier una volta calcolato il range interquartile e verificato che questo è inferiore ad 1€.
+
+Potrebbe stupire che, sebbene le carte ad alto costo di mana siano quelle che dovrebbero portare un maggiore impatto nella partita, i prezzi maggiori si riscontrino tra le carte a costo inferiore.
+
+Possiamo spiegare questo fenomeno soltanto in termini di mole di dati? Quindi avere valori di prezzo così alti per carte a basso costo di mana nonostante una media molto bassa, soltanto in virtù del fatto che, come visto dalla precedente visualizzazione, ci sono molte più carte a basso costo? Questa risposta non spiega ad esempio i prezzi medi relativamente alti delle carte a bassissimo costo, 0 e 1 (si tenga presente che essendo il grafico logaritmico, la differenza tra le medie è più accentuata di ciò che appare, ma il trade-off era necessario). La conoscenza di dominio ci permette di fare luce su questa apparente contraddizione, che è in realtà una caratteristica del gioco nota alla maggior parte dei giocatori esperti: la lunga vita di MtG ha portato a carte di ogni genere, che assolvono qualsiasi funzione i giocatori richiedano dal loro mazzo. Pertanto, il gioco è divenuto progressivamente più rapido, in quanto il risultato ottenuto con una carta ad alto costo può tipicamente essere raggiunto dalla sinergia di carte a costo minore, e il limite massimo, imposto dal mana disponibile, alle carte giocabili in un turno, rende la seconda opzione molto più efficiente e preferibile. Da questo una domanda maggiore per carte più "veloci", che ne aumenta i prezzi. Addirittura, una media  di prezzo così elevata per carte ad alto costo, raramente incluse nei mazzi di alto livello, pare in contrasto con l'esperienza comune, e merita di essere ulteriormente analizzata.
+
+```{r, echo=FALSE}
+high.cmc <- df[df$convertedManaCost > 8, ]
+
+totalplot <- ggplot(df, aes(convertedManaCost, price)) + 
+  geom_col(aes(fill=rarity)) +
+  ylab("Cumulated price") +
+  xlab("converted mana cost") +
+  theme_bw() 
+
+highplot <- ggplot(high.cmc, aes(convertedManaCost, price)) + 
+  geom_col(aes(fill=rarity)) +
+  ylab("Cumulated price") +
+  xlab("converted mana cost (high values)") +
+  theme_bw() 
+
+grid.arrange(totalplot, highplot)
+```
+
+Ecco spiegato anche l'ultimo dubbio: sebbene le carte ad alto costo siano meno richieste nella formazione di mazzi, esse sono tutte carte molto rare, che come abbiamo visto sono caratterizzate da una disponibilità molto limitata, da cui il prezzo mediamente alto.
+La prima risposta che possiamo offrire alla domanda in esame è quindi: <b>le carte ad alto costo di mana hanno un valore medio molto alto, a causa della propria rarità, nonostante non vengano giocate.</b>
+
+## Edizione
+
+La prossima variabile non numerica che consideriamo è l'edizione: le varie edizioni di carte hanno un valore costante?
+
+```{r, echo=FALSE}
+price_by_set <- df %>% group_by(setCode) %>% summarise(price = sum(price), .groups="drop")
+sets <- merge(price_by_set, sets, by.x="setCode", by.y="keyruneCode")
+sets <- data.frame(sets[order(sets$releaseDate), ])
+rownames(sets) <- NULL  #reindexing needed to plot
+ggplot(sets, aes(releaseDate, price)) + 
+  geom_point() +
+  xlab("release date") +
+  theme_bw() + 
+  theme(axis.text.x = element_blank(), axis.ticks = element_blank())
+```
+
+Ordinandole per data di rilascio, ci appare chiaro che le prime edizioni abbiano un valore spropositato rispetto alle altre. Questo è noto: quando le tirature erano limitatissime e il gioco non aveva ancora i contorni odierni, alcune carte erano totalmente fuori scala in quanto a rapporto costo-beneficio e non sono mai state ristampate. La somma di impatto enorme e offerta ridottissima hanno generato i prezzi che vediamo. Rimuoviamo questi outlier per poter osservare meglio l'andamento delle altre edizioni.
+
+```{r, echo=FALSE}
+lows <- sets %>% filter(price < 3000)
+ggplot(lows, aes(releaseDate, price)) + 
+  geom_point() +
+  theme_bw() + 
+  theme(axis.text.x = element_blank(), axis.ticks = element_blank())
+```
+
+Quello che notiamo immediatamente è che resta una grande variabilità di prezzo tra le edizioni, e questo ci porta alla seguente domanda: le edizioni di prezzo elevato lo sono per la presenza di un numero ridotto di carte, o per un valore medio? In entrambi i casi, cercheremo di estrapolare se possibile la caratteristica di questi sotto insiemi.
+
+```{r, echo=FALSE}
+mids.eds <- lows[lows$price > 1500, ]$setCode %>% unique()
+mids <- df[df$setCode %in% mids.eds, ]
+ggplot(mids, aes(setCode, price)) + 
+  geom_violin(fill='#E7E7E7') +
+  geom_boxplot(width=0.1) + theme_minimal() +
+  xlab("set code") +
+  scale_y_log10(breaks=c(0.1, 1, 10, 100, 1000), labels=c("0.1", "1", "10", "100", "1000")) +
+  theme_bw()
+```
+
+Il violin plot ci restituisce una situazione ibrida: le edizioni continuano ad avere mode molto basse, ma mentre alcune hanno solo delle sottili code ad alti valori, altre hanno effettivamente numeri più consistenti. Questa condizione rende diffile stabilire la presenza e l'origine di eventuali pattern nei risultati basandosi sulle edizioni.
+
+## Tipo
+
+L'ultima analisi rimasta è quella relativa al tipo delle carte.
+
+```{r, echo=FALSE}
+ggplot(df, aes(types, price)) +
+  geom_boxplot(fill='lightgrey') + theme_minimal() +
+  xlab(" ") +
+  scale_y_log10(breaks=c(0.1, 1, 10, 100, 1000), labels=c("0.1", "1", "10", "100", "1000")) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Questo grafico ci da effettivamente dei risultati interessanti: Notiamo infatti come, sebbene senza dubbio influenzato dalla ridotta quantità di elementi, la combinazione di tipi Terra-Creatura comporti un prezzo medio elevatissimo, e in misura minore anche le combinazioni Terra-Artefatto, Incantesimo-Artefatto e Tribale-Artefatto si discostino nettamente dal resto del panorama. Già ad un primo impatto abbiamo una risposta alquanto soddisfacente: <b>Il tipo è un buon indice del prezzo delle carte e in particolare lo sono le seguenti combinazioni: Terra-Creatura, Terra-Artefatto, Incantesimo-Artefatto e Tribale-Artefatto.</b>
+
+Scendiamo nello specifico dei tipi che comportano nuove caratteristiche per le carte, ovvero Creatura, che introduce gli attributi Forza e Costituzione, e Planeswalker, che introduce Lealtà.
+
+```{r, echo=FALSE}
+creatures.numeric <- creatures
+creatures.numeric[, c("name", "supertypes", "subtypes", "rarity", "setCode")] <- NULL
+corrplot(cor(creatures.numeric, use="complete.obs"))
+```
+
+Le forti correlazioni sono alquanto triviali: ci dicono che carte dall'alto costo di mana tendono ad avere alta forza e costituzione, e che queste vanno di pari passo tra loro. Impariamo anche essere presente una correlazione tra la mancanza di colore e il costo di mana, ovvero che le carte senza colore tendono ad essere leggermente più costose (in partita) delle altre. Questo dato è interessante ed è probabilmente una scelta precisa degli ideatori del gioco per non rendere carte senza colore troppo semplici da lanciare per i maghi, dato che esse non richiedono specificità sul tipo di carte terra richieste per poter essere giocate. Purtroppo nulla emerge per quanto riguarda il prezzo.
+
+Passiamo allora ai planeswalker.
+
+```{r, echo=FALSE}
+planeswalkers.numeric <- planeswalkers
+planeswalkers.numeric[, c("name", "supertypes", "subtypes", "rarity", "setCode")] <- NULL
+corrplot(cor(planeswalkers.numeric, use="complete.obs"))
+```
+
+Come per le creature, il legame costo di mana - lealtà è alquanto triviale, si affacciano però leggere correlazioni di diversi attributi con il prezzo, attributi che tra loro non dimostrano avere forti legami. Queste sono condizioni promettenti per un modello di regressione multipla.
+
+```{r, echo=FALSE}
+mod <- lm(price ~ white + blue + black + red + green + colorless + loyalty, planeswalkers.numeric)
+summary(mod)
+```
+
+Il test F è significativo, ma un R-quadro di appena 0.08 non rende questo un modello adatto a spiegare la variabile dipendente prezzo. Purtroppo il modello multiplo non aiuta nella previsione del prezzo delle carte. I passi successivi potrebbero essere una regressione con modelli non lineari, o l'analisi delle serie storiche dei prezzi, caratteristica pressochè fondamentale in ogni tecnica di previsione del prezzo di un bene. Entrambe queste tecniche sono però al di fuori degli scopi della presente trattazione, e vengono perciò riservate a futuri approfondimenti.
